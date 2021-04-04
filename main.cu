@@ -86,7 +86,9 @@ float *w1, *b1, *w2, *b2, *w3, *b3;
 float *hw1, *hb1, *hw2, *hb2, *hw3, *hb3;
 size_t pitch_w1, pitch_b1, pitch_w2, pitch_b2, pitch_w3, pitch_b3;
 
-float* params[] = {hw1, hb1, hw2, hb2, hw3, hb3};
+float* params[] = {w1, b1, w2, b2, w3, b3};
+float* hparams[] = {hw1, hb1, hw2, hb2, hw3, hb3};
+size_t* pitches[] = {&pitch_w1, &pitch_b1, &pitch_w2, &pitch_b2, &pitch_w3, &pitch_b3};
 
 int max_indices[] = {INPUT_SIZE * LAYER_SIZE_1,
                      INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1,
@@ -94,6 +96,13 @@ int max_indices[] = {INPUT_SIZE * LAYER_SIZE_1,
                      INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2,
                      INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2 + LAYER_SIZE_2 * LAYER_SIZE_3,
                      INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2 + LAYER_SIZE_2 * LAYER_SIZE_3 + LAYER_SIZE_3};
+
+int param_sizes[][2] = {{LAYER_SIZE_1, INPUT_SIZE},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_2, LAYER_SIZE_1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_3, LAYER_SIZE_2},
+                        {LAYER_SIZE_3, 1}};
 
 // Processing stages
 
@@ -106,7 +115,9 @@ void initialize_weights() {
     int pindex;
 
     for (pindex = 0; pindex < 6; pindex++) {
-        params[pindex] = (float *) malloc(((pindex == 0) ? max_indices[0] : max_indices[pindex] - max_indices[pindex - 1]) * sizeof(float));
+        size_t malloc_size = ((pindex == 0) ? max_indices[0] : max_indices[pindex] - max_indices[pindex - 1]) * sizeof(float);
+        cudaMallocPitch(&params[pindex], pitches[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0]);
+        hparams[pindex] = (float *) malloc(malloc_size);
     }
     pindex = 0;
 
@@ -115,11 +126,15 @@ void initialize_weights() {
 
     for (findex = 0; findex < max_indices[5]; findex++) {
         if (findex >= max_indices[pindex]) pindex++;
-        float *value = params[pindex];
+        float *value = hparams[pindex];
         fscanf(fp, "%f,", &value[findex - ((pindex == 0) ? 0 : max_indices[pindex - 1])]);
     }
 
     fclose(fp);
+
+    for (pindex = 0; pindex < 6; pindex++) {
+        cudaMemcpy2D(params[pindex], *pitches[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
+    }
 
 }
 
@@ -142,6 +157,38 @@ void inference() {
 }
 
 int main (int argc, char *argv[]) {
+    /*
+    float *a, *b, *c;
+    float *d_a, *d_b, *d_c;
+
+    a = (float *) malloc(A_R * A_C * sizeof(float));
+    b = (float *) malloc(B_R * B_C * sizeof(float));
+    c = (float *) malloc(A_R * B_C * sizeof(float));
+
+    memcpy(a, A, A_R * A_C * sizeof(float));
+    memcpy(b, A, B_R * B_C * sizeof(float));
+
+    size_t pitch_a;
+    size_t pitch_b;
+    size_t pitch_c;
+
+    cudaMallocPitch(&d_a, &pitch_a, A_C * sizeof(float), A_R);
+    cudaMallocPitch(&d_b, &pitch_b, B_C * sizeof(float), B_R);
+    cudaMallocPitch(&d_c, &pitch_c, B_C * sizeof(float), A_R);
+
+    cudaMemcpy2D(d_a, pitch_a, a, A_C * sizeof(float), A_C * sizeof(float), A_R, cudaMemcpyHostToDevice);
+    cudaMemcpy2D(d_b, pitch_b, b, B_C * sizeof(float), B_C * sizeof(float), B_R, cudaMemcpyHostToDevice);
+
+    expsum<<<1, 64>>>(d_a, d_b, pitch_a, A_R, A_C);
+    cudaDeviceSynchronize();
+    softmax<<<1, 64>>>(d_a, d_c, d_b, pitch_a, pitch_c, A_R, A_C);
+
+    gpuErrchk(cudaMemcpy2D(c, B_C * sizeof(float), d_c, pitch_c, B_C * sizeof(float), A_R, cudaMemcpyDeviceToHost));
+
+    for (int i = 0; i < A_R * B_C; i++) {
+        printf("%f\n", c[i]);
+    }
+    */
 
     initialize_weights();
 

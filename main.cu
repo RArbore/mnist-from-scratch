@@ -106,8 +106,19 @@ int param_sizes[][2] = {{LAYER_SIZE_1, INPUT_SIZE},
 
 // Processing stages
 
-float *stages[10], *sum;
+float *stages[10], *hstages[10], *sum;
 size_t pitch_stages[10];
+
+int stage_sizes[][2] = {{INPUT_SIZE, 1},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_3, 1},
+                        {LAYER_SIZE_3, 1},
+                        {LAYER_SIZE_3, 1}};
 
 void initialize_weights() {
 
@@ -135,6 +146,31 @@ void initialize_weights() {
     for (pindex = 0; pindex < 6; pindex++) {
         cudaMemcpy2D(params[pindex], *pitches[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
     }
+
+}
+
+void initialize_stages() {
+
+    int sindex;
+
+    for (sindex = 0; sindex < 10; sindex++) {
+        cudaMallocPitch(&stages[sindex], &pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0]);
+        hstages[sindex] = (float *) calloc(stage_sizes[sindex][1] * stage_sizes[sindex][0], sizeof(float));
+    }
+
+    cudaMalloc(&sum, sizeof(float));
+
+}
+
+void reset_stages() {
+
+    int sindex;
+
+    for (sindex = 0; sindex < 10; sindex++) {
+        cudaMemcpy2D(stages[sindex], pitch_stages[sindex], hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyHostToDevice);
+    }
+
+    cudaMemset(sum, 0, 1);
 
 }
 

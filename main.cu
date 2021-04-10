@@ -17,6 +17,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define LAYER_SIZE_2 16
 #define LAYER_SIZE_3 10
 
+#define DATA_SIZE 60000
+
 __global__
 void matmul(float *a, float *b, float *c, size_t pitch_a, size_t pitch_b, size_t pitch_c, size_t a_r, size_t a_c, size_t b_r, size_t b_c) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -192,6 +194,44 @@ void inference() {
 
 }
 
+float *images[DATA_SIZE], *labels;
+float *himages[DATA_SIZE], *hlabels;
+size_t pitch_images[DATA_SIZE];
+
+void load_data() {
+
+    int iindex, pindex;
+
+    for (iindex = 0; iindex < DATA_SIZE; iindex++) {
+        cudaMallocPitch(&images[iindex], &pitch_images[iindex], stage_sizes[0][1] * sizeof(float), stage_sizes[0][0]);
+        himages[iindex] = (float *) malloc(stage_sizes[0][1] * stage_sizes[0][0] * sizeof(float));
+
+    }
+
+    cudaMalloc(&labels, DATA_SIZE * sizeof(float));
+    hlabels = (float *) malloc(DATA_SIZE * sizeof(float));
+
+    FILE *fi, *fl;
+    fi = fopen("images.csv", "r");
+    fl = fopen("labels.csv", "r");
+
+    for (iindex = 0; iindex < DATA_SIZE; iindex++) {
+        for (pindex = 0; pindex < INPUT_SIZE; pindex++) {
+            fscanf(fi, "%f,", himages[iindex] + pindex);
+        }
+        fscanf(fl, "%f,", hlabels + iindex);
+    }
+
+    fclose(fi);
+    fclose(fl);
+
+    for (iindex = 0; iindex < DATA_SIZE; iindex++) {
+        cudaMemcpy2D(images[iindex], pitch_images[iindex], himages[iindex], stage_sizes[0][1] * sizeof(float), stage_sizes[0][1] * sizeof(float), stage_sizes[0][0], cudaMemcpyHostToDevice);
+    }
+    cudaMemcpy(labels, hlabels, DATA_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+}
+
 int main (int argc, char *argv[]) {
     /*
     float *a, *b, *c;
@@ -227,6 +267,9 @@ int main (int argc, char *argv[]) {
     */
 
     initialize_weights();
+    initialize_stages();
+    reset_stages();
+    inference();
 
     return 0;
 }

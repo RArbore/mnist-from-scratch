@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -17,7 +18,11 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define LAYER_SIZE_2 16
 #define LAYER_SIZE_3 10
 
+#define LOAD_MODEL 0
+
 #define DATA_SIZE 100
+
+#define RAND_GRANULARITY 1000
 
 __global__
 void matmul(float *a, float *b, float *c, size_t pitch_a, size_t pitch_b, size_t pitch_c, size_t a_r, size_t a_c, size_t b_r, size_t b_c) {
@@ -129,8 +134,7 @@ int stage_sizes[][2] = {{INPUT_SIZE, 1},
 
 void initialize_weights() {
 
-    int findex;
-    int pindex;
+    int findex, pindex;
 
     for (pindex = 0; pindex < 6; pindex++) {
         size_t malloc_size = ((pindex == 0) ? max_indices[0] : max_indices[pindex] - max_indices[pindex - 1]) * sizeof(float);
@@ -139,16 +143,34 @@ void initialize_weights() {
     }
     pindex = 0;
 
-    FILE *fp;
-    fp = fopen("model.csv", "r");
+    if (LOAD_MODEL) {
+        FILE *fp;
+        fp = fopen("model.csv", "r");
 
-    for (findex = 0; findex < max_indices[5]; findex++) {
-        if (findex >= max_indices[pindex]) pindex++;
-        float *value = hparams[pindex];
-        fscanf(fp, "%f,", &value[findex - ((pindex == 0) ? 0 : max_indices[pindex - 1])]);
+        for (findex = 0; findex < max_indices[5]; findex++) {
+            if (findex >= max_indices[pindex]) pindex++;
+            float *value = hparams[pindex];
+            fscanf(fp, "%f,", &value[findex - ((pindex == 0) ? 0 : max_indices[pindex - 1])]);
+        }
+
+        fclose(fp);
     }
-
-    fclose(fp);
+    else {
+        int layer_size;
+        float stdv;
+        
+        for (findex = 0; findex < max_indices[5]; findex++) {
+            if (findex >= max_indices[pindex]) {
+                pindex++;
+                layer_size = param_sizes[pindex][1];
+                stdv = 1.0 / sqrt((float) layer_size);
+            }
+            
+            float *value = hparams[pindex];
+            float randu = ((float) (rand() % RAND_GRANULARITY)) / RAND_GRANULARITY;
+            value[findex - ((pindex == 0) ? 0 : max_indices[pindex - 1])] = randu * stdv * 2 - stdv;
+        }
+    }
 
     for (pindex = 0; pindex < 6; pindex++) {
         cudaMemcpy2D(params[pindex], pitches[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
@@ -253,6 +275,8 @@ void load_data() {
 
 int main (int argc, char *argv[]) {
 
+    time_t t;
+    srand((unsigned) time(&t));
     initialize_weights();
     initialize_stages();
     load_data();

@@ -22,7 +22,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 
 #define DATA_SIZE 100
 
-#define RAND_GRANULARITY 1000
+#define RAND_GRANULARITY 10000
 
 __global__
 void matmul(float *a, float *b, float *c, size_t pitch_a, size_t pitch_b, size_t pitch_c, size_t a_r, size_t a_c, size_t b_r, size_t b_c) {
@@ -102,7 +102,7 @@ void softmax(float *a, float *b, float *sum, float *maxf, size_t pitch_a, size_t
 }
 
 float *params[6], *hparams[6];
-size_t pitches[6];
+size_t pitch_params[6];
 
 int max_indices[] = {INPUT_SIZE * LAYER_SIZE_1,
                      INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1,
@@ -138,7 +138,7 @@ void initialize_weights() {
 
     for (pindex = 0; pindex < 6; pindex++) {
         size_t malloc_size = ((pindex == 0) ? max_indices[0] : max_indices[pindex] - max_indices[pindex - 1]) * sizeof(float);
-        gpuErrchk(cudaMallocPitch(&params[pindex], &pitches[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0]));
+        gpuErrchk(cudaMallocPitch(&params[pindex], &pitch_params[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0]));
         hparams[pindex] = (float *) malloc(malloc_size);
     }
     pindex = 0;
@@ -173,7 +173,7 @@ void initialize_weights() {
     }
 
     for (pindex = 0; pindex < 6; pindex++) {
-        cudaMemcpy2D(params[pindex], pitches[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
+        cudaMemcpy2D(params[pindex], pitch_params[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
     }
 
 }
@@ -209,20 +209,20 @@ void reset_stages() {
 
 void inference() {
 
-    matmul<<<16, 1>>>(params[0], stages[0], stages[1], pitches[0], pitch_stages[0], pitch_stages[1], 16, 784, 784, 1);
-    matadd<<<16, 1>>>(stages[1], params[1], stages[2], pitch_stages[1], pitches[1], pitch_stages[2], 16, 1);
-    leakyrelu<<<16, 1>>>(stages[2], stages[3], 0.2, pitch_stages[2], pitch_stages[3], 16, 1);
+    matmul<<<16, 1>>>(params[0], stages[0], stages[1], pitch_params[0], pitch_stages[0], pitch_stages[1], LAYER_SIZE_1, INPUT_SIZE, INPUT_SIZE, 1);
+    matadd<<<16, 1>>>(stages[1], params[1], stages[2], pitch_stages[1], pitch_params[1], pitch_stages[2], LAYER_SIZE_1, 1);
+    leakyrelu<<<16, 1>>>(stages[2], stages[3], 0.2, pitch_stages[2], pitch_stages[3], LAYER_SIZE_1, 1);
 
-    matmul<<<16, 1>>>(params[2], stages[3], stages[4], pitches[2], pitch_stages[3], pitch_stages[4], 16, 16, 16, 1);
-    matadd<<<16, 1>>>(stages[4], params[3], stages[5], pitch_stages[4], pitches[3], pitch_stages[5], 16, 1);
-    leakyrelu<<<16, 1>>>(stages[5], stages[6], 0.2, pitch_stages[5], pitch_stages[6], 16, 1);
+    matmul<<<16, 1>>>(params[2], stages[3], stages[4], pitch_params[2], pitch_stages[3], pitch_stages[4], LAYER_SIZE_2, LAYER_SIZE_1, LAYER_SIZE_1, 1);
+    matadd<<<16, 1>>>(stages[4], params[3], stages[5], pitch_stages[4], pitch_params[3], pitch_stages[5], LAYER_SIZE_2, 1);
+    leakyrelu<<<16, 1>>>(stages[5], stages[6], 0.2, pitch_stages[5], pitch_stages[6], LAYER_SIZE_2, 1);
 
-    matmul<<<10, 1>>>(params[4], stages[6], stages[7], pitches[4], pitch_stages[6], pitch_stages[7], 10, 16, 16, 1);
-    matadd<<<10, 1>>>(stages[7], params[5], stages[8], pitch_stages[7], pitches[5], pitch_stages[8], 10, 1);
+    matmul<<<10, 1>>>(params[4], stages[6], stages[7], pitch_params[4], pitch_stages[6], pitch_stages[7], LAYER_SIZE_3, LAYER_SIZE_2, LAYER_SIZE_2, 1);
+    matadd<<<10, 1>>>(stages[7], params[5], stages[8], pitch_stages[7], pitch_params[5], pitch_stages[8], LAYER_SIZE_3, 1);
 
-    max<<<1, 1>>>(stages[8], maxf, pitch_stages[8], 10, 1);
-    expsum<<<10, 1>>>(stages[8], sum, maxf, pitch_stages[8], 10, 1);
-    softmax<<<10, 1>>>(stages[8], stages[9], sum, maxf, pitch_stages[8], pitch_stages[9], 10, 1);
+    max<<<1, 1>>>(stages[8], maxf, pitch_stages[8], LAYER_SIZE_3, 1);
+    expsum<<<10, 1>>>(stages[8], sum, maxf, pitch_stages[8], LAYER_SIZE_3, 1);
+    softmax<<<10, 1>>>(stages[8], stages[9], sum, maxf, pitch_stages[8], pitch_stages[9], LAYER_SIZE_3, 1);
 
     int sindex, nindex;
     for (sindex = 9; sindex < 10; sindex++) {

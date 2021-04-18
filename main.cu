@@ -17,12 +17,62 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define LAYER_SIZE_1 16
 #define LAYER_SIZE_2 16
 #define LAYER_SIZE_3 10
-
-#define LOAD_MODEL 0
+#define NUM_LAYERS 3
+#define NUM_PARAMS 6
+#define NUM_STAGES 10
+#define NUM_GRADS 9
 
 #define DATA_SIZE 100
-
 #define RAND_GRANULARITY 10000
+#define LOAD_MODEL 1
+
+float *params[NUM_PARAMS], *hparams[NUM_PARAMS];
+size_t pitch_params[NUM_PARAMS];
+
+int max_indices[] = {INPUT_SIZE * LAYER_SIZE_1,
+                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1,
+                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2,
+                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2,
+                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2 + LAYER_SIZE_2 * LAYER_SIZE_3,
+                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2 + LAYER_SIZE_2 * LAYER_SIZE_3 + LAYER_SIZE_3};
+
+int param_sizes[][2] = {{LAYER_SIZE_1, INPUT_SIZE},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_2, LAYER_SIZE_1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_3, LAYER_SIZE_2},
+                        {LAYER_SIZE_3, 1}};
+
+float *stages[NUM_STAGES], *hstages[NUM_STAGES], *hout, *sum, *maxf, *loss;
+size_t pitch_stages[NUM_STAGES];
+
+int stage_sizes[][2] = {{INPUT_SIZE, 1},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_1, 1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_2, 1},
+                        {LAYER_SIZE_3, 1},
+                        {LAYER_SIZE_3, 1},
+                        {LAYER_SIZE_3, 1}};
+
+float *grads[NUM_GRADS];
+size_t pitch_grads[NUM_GRADS];
+
+int grad_sizes[][2] = {{LAYER_SIZE_1, INPUT_SIZE},
+                       {LAYER_SIZE_1, 1},
+                       {LAYER_SIZE_1, 1},
+                       {LAYER_SIZE_2, LAYER_SIZE_1},
+                       {LAYER_SIZE_2, 1},
+                       {LAYER_SIZE_2, 1},
+                       {LAYER_SIZE_3, LAYER_SIZE_2},
+                       {LAYER_SIZE_3, 1},
+                       {LAYER_SIZE_3, 1}};
+
+float *images[DATA_SIZE], *labels;
+float *himages[DATA_SIZE], *hlabels;
+size_t pitch_images[DATA_SIZE];
 
 __global__
 void matmul(float *a, float *b, float *c, size_t pitch_a, size_t pitch_b, size_t pitch_c, size_t a_r, size_t a_c, size_t b_r, size_t b_c) {
@@ -101,44 +151,85 @@ void softmax(float *a, float *b, float *sum, float *maxf, size_t pitch_a, size_t
     }
 }
 
-float *params[6], *hparams[6];
-size_t pitch_params[6];
+__global__
+void cross_entropy(float *pred, float *label, float *loss, size_t pitch_pred, size_t r, size_t c, int image) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < r * c) {
+        int row = i;
+        int col = 0;
+        float *elem_pred = (float *)(((char *) pred) + row * pitch_pred + col * sizeof(float));
+        float elem_loss = -(label[image] == i ? log(*elem_pred) : log(1 - *elem_pred));
+        if (isinf(elem_loss)) elem_loss = 1000000.0f;
+        atomicAdd(loss, elem_loss);
+    }
+}
 
-int max_indices[] = {INPUT_SIZE * LAYER_SIZE_1,
-                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1,
-                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2,
-                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2,
-                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2 + LAYER_SIZE_2 * LAYER_SIZE_3,
-                     INPUT_SIZE * LAYER_SIZE_1 + LAYER_SIZE_1 + LAYER_SIZE_1 * LAYER_SIZE_2 + LAYER_SIZE_2 + LAYER_SIZE_2 * LAYER_SIZE_3 + LAYER_SIZE_3};
+__global__
+void calc_grad_w(int layer, float *label, int image, int param_sizes[][2], float *params[NUM_PARAMS], float *stages[NUM_STAGES], float *grads[NUM_GRADS], size_t pitch_params[NUM_PARAMS], size_t pitch_stages[NUM_STAGES], size_t pitch_grads[NUM_GRADS]) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < param_sizes[layer * 2][1] * param_sizes[layer * 2][0]) {
+        int row = i / param_sizes[layer * 2][0];
+        int col = i % param_sizes[layer * 2][0];
 
-int param_sizes[][2] = {{LAYER_SIZE_1, INPUT_SIZE},
-                        {LAYER_SIZE_1, 1},
-                        {LAYER_SIZE_2, LAYER_SIZE_1},
-                        {LAYER_SIZE_2, 1},
-                        {LAYER_SIZE_3, LAYER_SIZE_2},
-                        {LAYER_SIZE_3, 1}};
+        float *param_pt = (float *)(((char *) params[layer * 2]) + row * pitch_params[layer * 2] + col * sizeof(float));
+        float *grad_pt = (float *)(((char *) grads[layer * 3]) + row * pitch_grads[layer * 3] + col * sizeof(float));
 
-float *stages[10], *hstages[10], *hout, *sum, *maxf;
-size_t pitch_stages[10];
+        float *pa_pt = (float *)(((char *) stages[layer * 3]) + col * pitch_stages[layer * 3]);
+        float *z_pt = (float *)(((char *) stages[layer * 3 + 2]) + row * pitch_stages[layer * 3 + 2]);
+    }
+}
 
-int stage_sizes[][2] = {{INPUT_SIZE, 1},
-                        {LAYER_SIZE_1, 1},
-                        {LAYER_SIZE_1, 1},
-                        {LAYER_SIZE_1, 1},
-                        {LAYER_SIZE_2, 1},
-                        {LAYER_SIZE_2, 1},
-                        {LAYER_SIZE_2, 1},
-                        {LAYER_SIZE_3, 1},
-                        {LAYER_SIZE_3, 1},
-                        {LAYER_SIZE_3, 1}};
+__global__
+void calc_grad_x(int layer, float *label, int image, int param_sizes[][2], float *params[NUM_PARAMS], float *stages[NUM_STAGES], float *grads[NUM_GRADS], size_t pitch_params[NUM_PARAMS], size_t pitch_stages[NUM_STAGES], size_t pitch_grads[NUM_GRADS]) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < param_sizes[layer * 2][0]) {
+        int row = i;
+        int col = 0;
+
+        float *grad_pt = (float *)(((char *) grads[layer * 3 + 1]) + row * pitch_grads[layer * 3 + 1] + col * sizeof(float));
+
+        float *pa_pt = (float *)(((char *) stages[layer * 3]) + col * pitch_stages[layer * 3]);
+        float *z_pt = (float *)(((char *) stages[layer * 3 + 2]) + row * pitch_stages[layer * 3 + 2]);
+        float *out_pt = (float *)(((char *) stages[layer * 3 + 3]) + row * pitch_stages[layer * 3 + 3]);
+
+        *grad_pt = 0;
+        if (layer == NUM_LAYERS - 1) {
+            *grad_pt = *out_pt - (label[image] == row);
+        }
+        else if (layer == NUM_LAYERS - 2) {
+            int m_row;
+            float *grad_prev_pt, *param_pt;
+            for (m_row = 0; m_row < param_sizes[layer * 2 + 2][0]; m_row++) {
+                grad_prev_pt = (float *)(((char *) grads[layer * 3 + 4]) + m_row * pitch_grads[layer * 3 + 4] + col * sizeof(float));
+                param_pt = (float *)(((char *) params[layer * 2]) + m_row * pitch_params[layer * 2] + row * sizeof(float));
+                *grad_pt += *grad_prev_pt * *param_pt;
+            }
+        }
+    }
+}
+
+__global__
+void calc_grad_b(int layer, float *label, int image, int param_sizes[][2], float *params[NUM_PARAMS], float *stages[NUM_STAGES], float *grads[NUM_GRADS], size_t pitch_params[NUM_PARAMS], size_t pitch_stages[NUM_STAGES], size_t pitch_grads[NUM_GRADS]) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < param_sizes[layer * 2][1]) {
+        int row = i;
+        int col = 0;
+
+        float *param_pt = (float *)(((char *) params[layer * 2 + 1]) + row * pitch_params[layer * 2 + 1] + col * sizeof(float));
+        float *grad_pt = (float *)(((char *) grads[layer * 3 + 2]) + row * pitch_grads[layer * 3 + 2] + col * sizeof(float));
+
+        float *pa_pt = (float *)(((char *) stages[layer * 3]) + col * pitch_stages[layer * 3]);
+        float *z_pt = (float *)(((char *) stages[layer * 3 + 2]) + row * pitch_stages[layer * 3 + 2]);
+    }
+}
 
 void initialize_weights() {
 
     int findex, pindex;
 
-    for (pindex = 0; pindex < 6; pindex++) {
+    for (pindex = 0; pindex < NUM_PARAMS; pindex++) {
         size_t malloc_size = ((pindex == 0) ? max_indices[0] : max_indices[pindex] - max_indices[pindex - 1]) * sizeof(float);
-        gpuErrchk(cudaMallocPitch(&params[pindex], &pitch_params[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0]));
+        cudaMallocPitch(&params[pindex], &pitch_params[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0]);
         hparams[pindex] = (float *) malloc(malloc_size);
     }
     pindex = 0;
@@ -147,7 +238,7 @@ void initialize_weights() {
         FILE *fp;
         fp = fopen("model.csv", "r");
 
-        for (findex = 0; findex < max_indices[5]; findex++) {
+        for (findex = 0; findex < max_indices[NUM_PARAMS - 1]; findex++) {
             if (findex >= max_indices[pindex]) pindex++;
             float *value = hparams[pindex];
             fscanf(fp, "%f,", &value[findex - ((pindex == 0) ? 0 : max_indices[pindex - 1])]);
@@ -159,7 +250,7 @@ void initialize_weights() {
         int layer_size;
         float stdv;
         
-        for (findex = 0; findex < max_indices[5]; findex++) {
+        for (findex = 0; findex < max_indices[NUM_PARAMS - 1]; findex++) {
             if (findex >= max_indices[pindex]) {
                 pindex++;
                 layer_size = param_sizes[pindex][1];
@@ -172,7 +263,7 @@ void initialize_weights() {
         }
     }
 
-    for (pindex = 0; pindex < 6; pindex++) {
+    for (pindex = 0; pindex < NUM_PARAMS; pindex++) {
         cudaMemcpy2D(params[pindex], pitch_params[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
     }
 
@@ -182,8 +273,8 @@ void initialize_stages() {
 
     int sindex;
 
-    for (sindex = 0; sindex < 10; sindex++) {
-        gpuErrchk(cudaMallocPitch(&(stages[sindex]), &(pitch_stages[sindex]), stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0]));
+    for (sindex = 0; sindex < NUM_STAGES; sindex++) {
+        gpuErrchk(cudaMallocPitch(&stages[sindex], &pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0]));
         hstages[sindex] = (float *) calloc(stage_sizes[sindex][1] * stage_sizes[sindex][0], sizeof(float));
 
         gpuErrchk(cudaMemcpy2D(hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stages[sindex], pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyDeviceToHost));
@@ -191,6 +282,7 @@ void initialize_stages() {
     hout = (float *) calloc(stage_sizes[9][1] * stage_sizes[9][0], sizeof(float));
     cudaMalloc(&sum, sizeof(float));
     cudaMalloc(&maxf, sizeof(float));
+    cudaMalloc(&loss, sizeof(float));
 
 }
 
@@ -198,16 +290,27 @@ void reset_stages() {
 
     int sindex;
 
-    for (sindex = 0; sindex < 10; sindex++) {
+    for (sindex = 0; sindex < NUM_STAGES; sindex++) {
         cudaMemcpy2D(stages[sindex], pitch_stages[sindex], hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyHostToDevice);
     }
 
     cudaMemset(sum, 0, sizeof(float));
     cudaMemset(maxf, 0, sizeof(float));
+    cudaMemset(loss, 0, sizeof(float));
 
 }
 
-void inference() {
+void initialize_grads() {
+
+    int gindex;
+
+    for (gindex = 0; gindex < NUM_GRADS; gindex++) {
+        cudaMallocPitch(&grads[gindex], &pitch_grads[gindex], grad_sizes[gindex][1] * sizeof(float), grad_sizes[gindex][0]);
+    }
+
+}
+
+void inference(int image) {
 
     matmul<<<16, 1>>>(params[0], stages[0], stages[1], pitch_params[0], pitch_stages[0], pitch_stages[1], LAYER_SIZE_1, INPUT_SIZE, INPUT_SIZE, 1);
     matadd<<<16, 1>>>(stages[1], params[1], stages[2], pitch_stages[1], pitch_params[1], pitch_stages[2], LAYER_SIZE_1, 1);
@@ -223,21 +326,32 @@ void inference() {
     max<<<1, 1>>>(stages[8], maxf, pitch_stages[8], LAYER_SIZE_3, 1);
     expsum<<<10, 1>>>(stages[8], sum, maxf, pitch_stages[8], LAYER_SIZE_3, 1);
     softmax<<<10, 1>>>(stages[8], stages[9], sum, maxf, pitch_stages[8], pitch_stages[9], LAYER_SIZE_3, 1);
+    cross_entropy<<<10, 1>>>(stages[9], labels, loss, pitch_stages[9], LAYER_SIZE_3, 1, image);
 
+    float hloss;
+    cudaMemcpy(&hloss, loss, sizeof(float), cudaMemcpyDeviceToHost);
+    printf("%f\n", hloss);
+
+    /*
     int sindex, nindex;
-    for (sindex = 9; sindex < 10; sindex++) {
+    for (sindex = NUM_STAGES - 1; sindex < NUM_STAGES; sindex++) {
         gpuErrchk(cudaMemcpy2D(hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stages[sindex], pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyDeviceToHost));
         for (nindex = 0; nindex < stage_sizes[sindex][0]; nindex++) {
             printf("%f ", hstages[sindex][nindex]);
         }
         printf("\n");
     }
-
+    */
 }
 
-float *images[DATA_SIZE], *labels;
-float *himages[DATA_SIZE], *hlabels;
-size_t pitch_images[DATA_SIZE];
+void backprop(int image) {
+    int layer;
+    for (layer = NUM_LAYERS - 1; layer >= 0; layer--) {
+        calc_grad_w<<<param_sizes[layer * 2][1], param_sizes[layer * 2][0]>>>(layer, labels, image, param_sizes, params, stages, grads, pitch_params, pitch_stages, pitch_grads);
+        calc_grad_x<<<param_sizes[layer * 2][1], 1>>>(layer, labels, image, param_sizes, params, stages, grads, pitch_params, pitch_stages, pitch_grads);
+        calc_grad_b<<<param_sizes[layer * 2][0], 1>>>(layer, labels, image, param_sizes, params, stages, grads, pitch_params, pitch_stages, pitch_grads);
+    }
+}
 
 void load_data() {
 
@@ -284,7 +398,7 @@ int main (int argc, char *argv[]) {
     for (i = 0; i < DATA_SIZE; i++) {
         reset_stages();
         gpuErrchk(cudaMemcpy2D(stages[0], pitch_stages[0], images[i], pitch_images[i], stage_sizes[0][1] * sizeof(float), stage_sizes[0][0], cudaMemcpyDeviceToDevice));
-        inference();
+        inference(i);
     }
 
     return 0;

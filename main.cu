@@ -182,7 +182,7 @@ void calc_grad_w(int layer, float *label, int image, int *param_sizes, float *pa
 }
 
 __global__
-void calc_grad_x(int layer, float *label, int image, int *d_param_sizes, float *param, float *stage, float *z, float *grad, float *grad_prev, size_t pitch_param, size_t pitch_stage, size_t pitch_z, size_t pitch_grad, size_t pitch_grad_prev) {
+void calc_grad_x(int layer, float *label, int image, int *d_param_sizes, float *param, float *out, float *z, float *grad, float *grad_prev, size_t pitch_param, size_t pitch_out, size_t pitch_z, size_t pitch_grad, size_t pitch_grad_prev) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < d_param_sizes[layer * 4]) {
         int row = i;
@@ -190,7 +190,8 @@ void calc_grad_x(int layer, float *label, int image, int *d_param_sizes, float *
 
         printf("Hello\n");
         float *grad_pt = (float *)(((char *) grad) + row * pitch_grad + col * sizeof(float));
-        float *out_pt = (float *)(((char *) stage) + row * pitch_stage);
+        float *out_pt = (float *)(((char *) out) + row * pitch_out);
+        float *z_pt = (float *)(((char *) z) + row * pitch_z);
 
         *grad_pt = 0;
         if (layer == NUM_LAYERS - 1) {
@@ -207,11 +208,10 @@ void calc_grad_x(int layer, float *label, int image, int *d_param_sizes, float *
         }
         else {
             int m_row;
-            float *grad_prev_pt, *param_pt, *z_pt;
+            float *grad_prev_pt, *param_pt;
             for (m_row = 0; m_row < d_param_sizes[layer * 4 + 2]; m_row++) {
                 grad_prev_pt = (float *)(((char *) grad_prev) + m_row * pitch_grad_prev + col * sizeof(float));
                 param_pt = (float *)(((char *) param) + m_row * pitch_param + row * sizeof(float));
-                z_pt = (float *)(((char *) z) + row * pitch_z);
                 *grad_pt += *grad_prev_pt * *param_pt * (*z_pt >= 0 ? 1.0 : 0.2);
             }
         }

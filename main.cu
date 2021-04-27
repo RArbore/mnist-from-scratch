@@ -170,18 +170,16 @@ __global__
 void calc_grad_w(int layer, float *label, int image, int *d_param_sizes, float *z, float *pa, float *grad, float *grad_prev, size_t pitch_z, size_t pitch_pa, size_t pitch_grad, size_t pitch_grad_prev) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < d_param_sizes[layer * 4 + 1] * d_param_sizes[layer * 4]) {
-        int row = i / d_param_sizes[layer * 4];
-        int col = i % d_param_sizes[layer * 4];
+        int row = i / d_param_sizes[layer * 4 + 1];
+        int col = i % d_param_sizes[layer * 4 + 1];
 
         float *grad_pt = (float *)(((char *) grad) + row * pitch_grad + col * sizeof(float));
         float *grad_prev_pt = (float *)(((char *) grad_prev) + row * pitch_grad_prev);
         float *pa_pt = (float *)(((char *) pa) + col * pitch_pa);
         float *z_pt = (float *)(((char *) z) + row * pitch_z);
 
-
-        *grad_prev_pt = 0;
-        //*grad_pt = *pa_pt * *grad_prev_pt;
-        //*grad_pt *= layer == NUM_LAYERS - 1 ? 1.0 : (*z_pt >= 0 ? 1.0 : 0.2);
+        *grad_pt = *pa_pt * *grad_prev_pt;
+        *grad_pt *= layer == NUM_LAYERS - 1 ? 1.0 : (*z_pt >= 0 ? 1.0 : 0.2);
     }
 }
 
@@ -355,8 +353,12 @@ void backprop(int image) {
     int layer;
     for (layer = NUM_LAYERS - 1; layer >= 0; layer--) {
         calc_grad_x<<<param_sizes[layer * 2][1], 1>>>(layer, labels, image, d_param_sizes, params[layer * 2], stages[layer * 3 + 3], stages[layer * 3 + 2], grads[layer * 3 + 1], grads[layer * 3 + 4], pitch_params[layer * 2], pitch_stages[layer * 3 + 3], pitch_stages[layer * 3 + 2], pitch_grads[layer * 3 + 1], pitch_grads[layer * 3 + 4]);
-        //calc_grad_w<<<param_sizes[layer * 2][1], param_sizes[layer * 2][0]>>>(layer, labels, image, d_param_sizes, stages[layer * 3 + 2], stages[layer * 3], grads[layer * 3], grads[layer * 3 + 4], pitch_stages[layer * 3 + 2], pitch_stages[layer * 3], pitch_grads[layer * 3], pitch_grads[layer * 3 + 4]);
-        //calc_grad_b<<<param_sizes[layer * 2][0], 1>>>(layer, labels, image, d_param_sizes, params[layer * 2], stages[layer * 3 + 2], grads[layer * 3 + 2], grads[layer * 3 + 4], pitch_params[layer * 2], pitch_stages[layer * 3 + 2], pitch_grads[layer * 3 + 2], pitch_grads[layer * 3 + 4]);
+        gpuErrchk( cudaPeekAtLastError() );
+        gpuErrchk( cudaDeviceSynchronize() );
+        calc_grad_w<<<param_sizes[layer * 2][1], param_sizes[layer * 2][0]>>>(layer, labels, image, d_param_sizes, stages[layer * 3 + 2], stages[layer * 3], grads[layer * 3], grads[layer * 3 + 1], pitch_stages[layer * 3 + 2], pitch_stages[layer * 3], pitch_grads[layer * 3], pitch_grads[layer * 3 + 1]);
+        gpuErrchk( cudaPeekAtLastError() );
+        gpuErrchk( cudaDeviceSynchronize() );
+        calc_grad_b<<<param_sizes[layer * 2][0], 1>>>(layer, labels, image, d_param_sizes, params[layer * 2], stages[layer * 3 + 2], grads[layer * 3 + 2], grads[layer * 3 + 1], pitch_params[layer * 2], pitch_stages[layer * 3 + 2], pitch_grads[layer * 3 + 2], pitch_grads[layer * 3 + 1]);
         gpuErrchk( cudaPeekAtLastError() );
         gpuErrchk( cudaDeviceSynchronize() );
     }

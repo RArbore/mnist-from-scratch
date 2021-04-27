@@ -22,7 +22,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define NUM_STAGES 10
 #define NUM_GRADS 9
 
-#define DATA_SIZE 100
+#define DATA_SIZE 1
 #define RAND_GRANULARITY 10000
 #define LOAD_MODEL 0
 
@@ -188,7 +188,7 @@ void calc_grad_w(int layer, float *label, int image, int *d_param_sizes, float *
 __global__
 void calc_grad_x(int layer, float *label, int image, int *d_param_sizes, float *param, float *out, float *z, float *grad, float *grad_prev, size_t pitch_param, size_t pitch_out, size_t pitch_z, size_t pitch_grad, size_t pitch_grad_prev) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < d_param_sizes[layer * 4 + 1]) {
+    if (i < d_param_sizes[layer * 4 + 2]) {
         int row = i;
 
         float *grad_pt = (float *)(((char *) grad) + row * pitch_grad);
@@ -201,16 +201,13 @@ void calc_grad_x(int layer, float *label, int image, int *d_param_sizes, float *
         else {
             int m_row;
             float *grad_prev_pt, *param_pt;
-            *grad_pt = 0; //delete ???
-            for (m_row = 0; m_row < d_param_sizes[layer * 4 + 2]; m_row++) {
+            *grad_pt = 0;
+            for (m_row = 0; m_row < d_param_sizes[layer * 4 + 6]; m_row++) {
                 grad_prev_pt = (float *)(((char *) grad_prev) + m_row * pitch_grad_prev);
-                if (layer == 0 && i == 0 && m_row == 0) printf("%d %p\n", layer, grad_prev_pt);
-                //param_pt = (float *)(((char *) param) + m_row * pitch_param + row * sizeof(float));
-                //*grad_pt += (layer == NUM_LAYERS - 2) ? (*grad_prev_pt * *param_pt) : (*grad_prev_pt * *param_pt * ((*z_pt >= 0) ? 1.0 : 0.2));
-                if (m_row == 0) *grad_pt = 2.0;
+                param_pt = (float *)(((char *) param) + m_row * pitch_param + row * sizeof(float));
+                *grad_pt += (layer == NUM_LAYERS - 2) ? (*grad_prev_pt * *param_pt) : (*grad_prev_pt * *param_pt * ((*z_pt >= 0) ? 1.0 : 0.2));
             }
         }
-        if (layer == 1 && i == 0) printf("%d %p\n", layer, grad_pt);
     }
 }
 
@@ -255,7 +252,8 @@ void initialize_weights() {
     else {
         int layer_size;
         float stdv;
-        
+        layer_size = param_sizes[pindex][1];
+        stdv = 1.0 / sqrt((float) layer_size);
         for (findex = 0; findex < max_indices[NUM_PARAMS - 1]; findex++) {
             if (findex >= max_indices[pindex]) {
                 pindex++;
@@ -270,7 +268,7 @@ void initialize_weights() {
     }
 
     for (pindex = 0; pindex < NUM_PARAMS; pindex++) {
-        cudaMemcpy2D(params[pindex], pitch_params[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice);
+        gpuErrchk(cudaMemcpy2D(params[pindex], pitch_params[pindex], hparams[pindex], param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][1] * sizeof(float), param_sizes[pindex][0], cudaMemcpyHostToDevice));
     }
 
 }
@@ -359,6 +357,8 @@ void backprop(int image) {
         calc_grad_x<<<param_sizes[layer * 2][1], 1>>>(layer, labels, image, d_param_sizes, params[layer * 2], stages[layer * 3 + 3], stages[layer * 3 + 2], grads[layer * 3 + 1], grads[layer * 3 + 4], pitch_params[layer * 2], pitch_stages[layer * 3 + 3], pitch_stages[layer * 3 + 2], pitch_grads[layer * 3 + 1], pitch_grads[layer * 3 + 4]);
         //calc_grad_w<<<param_sizes[layer * 2][1], param_sizes[layer * 2][0]>>>(layer, labels, image, d_param_sizes, stages[layer * 3 + 2], stages[layer * 3], grads[layer * 3], grads[layer * 3 + 4], pitch_stages[layer * 3 + 2], pitch_stages[layer * 3], pitch_grads[layer * 3], pitch_grads[layer * 3 + 4]);
         //calc_grad_b<<<param_sizes[layer * 2][0], 1>>>(layer, labels, image, d_param_sizes, params[layer * 2], stages[layer * 3 + 2], grads[layer * 3 + 2], grads[layer * 3 + 4], pitch_params[layer * 2], pitch_stages[layer * 3 + 2], pitch_grads[layer * 3 + 2], pitch_grads[layer * 3 + 4]);
+        gpuErrchk( cudaPeekAtLastError() );
+        gpuErrchk( cudaDeviceSynchronize() );
     }
 }
 

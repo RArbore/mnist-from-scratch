@@ -22,9 +22,12 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define NUM_STAGES 10
 #define NUM_GRADS 9
 
-#define DATA_SIZE 1
+#define DATA_SIZE 1000
 #define RAND_GRANULARITY 10000
 #define LOAD_MODEL 0
+
+#define NUM_EPOCHS 200
+#define LR 0.0001
 
 float *params[NUM_PARAMS], *hparams[NUM_PARAMS];
 size_t pitch_params[NUM_PARAMS];
@@ -160,7 +163,8 @@ void cross_entropy(float *pred, float *label, float *loss, size_t pitch_pred, si
         int row = i;
         int col = 0;
         float *elem_pred = (float *)(((char *) pred) + row * pitch_pred + col * sizeof(float));
-        float elem_loss = -(label[image] == i ? log(*elem_pred) : log(1 - *elem_pred));
+        float mult_pred = *elem_pred * 0.99998 + 0.00001;
+        float elem_loss = -(label[image] == i ? log(mult_pred) : log(1 - mult_pred));
         if (isinf(elem_loss)) elem_loss = 1000000.0f;
         atomicAdd(loss, elem_loss);
     }
@@ -221,6 +225,20 @@ void calc_grad_b(int layer, float *label, int image, int *d_param_sizes, float *
 
         *grad_pt = *grad_prev_pt;
         *grad_pt *= layer == NUM_LAYERS - 1 ? 1.0 : (*z_pt >= 0 ? 1.0 : 0.2);
+    }
+}
+
+__global__
+void grad_step(int param_num, int *d_param_sizes, float *param, float *grad, size_t pitch_param, size_t pitch_grad, float lr) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < d_param_sizes[param_num * 2] * d_param_sizes[param_num * 2 + 1]) {
+        int row = i / d_param_sizes[param_num * 2 + 1];
+        int col = i % d_param_sizes[param_num * 2 + 1];
+
+        float *param_pt = (float *)(((char *) param) + row * pitch_param + col * sizeof(float));
+        float *grad_pt = (float *)(((char *) grad) + row * pitch_grad + col * sizeof(float));
+
+        *param_pt -= lr * *grad_pt;
     }
 }
 
@@ -315,7 +333,7 @@ void initialize_grads() {
 
 }
 
-void inference(int image) {
+void inference(int image, float *ploss, int *pacc) {
 
     matmul<<<16, 1>>>(params[0], stages[0], stages[1], pitch_params[0], pitch_stages[0], pitch_stages[1], LAYER_SIZE_1, INPUT_SIZE, INPUT_SIZE, 1);
     matadd<<<16, 1>>>(stages[1], params[1], stages[2], pitch_stages[1], pitch_params[1], pitch_stages[2], LAYER_SIZE_1, 1);
@@ -335,18 +353,17 @@ void inference(int image) {
 
     float hloss;
     cudaMemcpy(&hloss, loss, sizeof(float), cudaMemcpyDeviceToHost);
-    //printf("%f\n", hloss);
+    *ploss += hloss;
 
-    /*
     int sindex, nindex;
     for (sindex = NUM_STAGES - 1; sindex < NUM_STAGES; sindex++) {
         gpuErrchk(cudaMemcpy2D(hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stages[sindex], pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyDeviceToHost));
-        for (nindex = 0; nindex < stage_sizes[sindex][0]; nindex++) {
-            printf("%f ", hstages[sindex][nindex]);
+        int max_index = 0;
+        for (nindex = 1; nindex < stage_sizes[sindex][0]; nindex++) {
+            if (hstages[sindex][nindex] > hstages[sindex][max_index]) max_index = nindex;
         }
-        printf("\n");
+        *pacc += max_index == hlabels[image];
     }
-    */
 }
 
 void backprop(int image) {
@@ -362,6 +379,16 @@ void backprop(int image) {
         gpuErrchk( cudaPeekAtLastError() );
         gpuErrchk( cudaDeviceSynchronize() );
     }
+}
+
+void grad_descent() {
+    int param_num;
+    int grad_num = 0;
+    for (param_num = 0; param_num < NUM_PARAMS; param_num++) {
+        grad_step<<<param_sizes[param_num][0], param_sizes[param_num][1]>>>(param_num, d_param_sizes, params[param_num], grads[grad_num], pitch_params[param_num], pitch_grads[grad_num], LR);
+        grad_num += (param_num % 2 == 0) ? 2 : 1;
+    }
+
 }
 
 void load_data() {
@@ -406,13 +433,20 @@ int main (int argc, char *argv[]) {
     initialize_stages();
     initialize_grads();
     load_data();
-    int i;
-    for (i = 0; i < DATA_SIZE; i++) {
-        reset_stages();
-        gpuErrchk(cudaMemcpy2D(stages[0], pitch_stages[0], images[i], pitch_images[i], stage_sizes[0][1] * sizeof(float), stage_sizes[0][0], cudaMemcpyDeviceToDevice));
-        inference(i);
-        backprop(i);
+    int i, epoch, pacc;
+    float epoch_loss;
+    for (epoch = 0; epoch < NUM_EPOCHS; epoch++) {
+        epoch_loss = 0;
+        pacc = 0;
+        for (i = 0; i < DATA_SIZE; i++) {
+            reset_stages();
+            gpuErrchk(cudaMemcpy2D(stages[0], pitch_stages[0], images[i], pitch_images[i], stage_sizes[0][1] * sizeof(float), stage_sizes[0][0], cudaMemcpyDeviceToDevice));
+            inference(i, &epoch_loss, &pacc);
+            backprop(i);
+            grad_descent();
+        }
+        epoch_loss /= (float) DATA_SIZE;
+        printf("Epoch %d   Loss : %f   Accuracy : %f\n", epoch, epoch_loss, ((float) pacc) / ((float) DATA_SIZE));
     }
-
     return 0;
 }

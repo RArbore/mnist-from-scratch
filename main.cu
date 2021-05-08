@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <float.h>
 #include <math.h>
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -26,7 +27,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define RAND_GRANULARITY 10000
 #define LOAD_MODEL 0
 
-#define NUM_EPOCHS 200
+#define NUM_EPOCHS 10000
 #define LR 0.0001
 
 float *params[NUM_PARAMS], *hparams[NUM_PARAMS];
@@ -48,7 +49,7 @@ int param_sizes[][2] = {{LAYER_SIZE_1, INPUT_SIZE},
 
 int *d_param_sizes;
 
-float *stages[NUM_STAGES], *hstages[NUM_STAGES], *hout, *sum, *maxf, *loss;
+float *stages[NUM_STAGES], *hstages[NUM_STAGES], *last_stage, *hout, *sum, *maxf, *loss;
 size_t pitch_stages[NUM_STAGES];
 
 int stage_sizes[][2] = {{INPUT_SIZE, 1},
@@ -140,6 +141,7 @@ void expsum(float *a, float *b, float *maxf, size_t pitch_a, size_t a_r, size_t 
         int row = i / a_c;
         int col = i % a_c;
         float *elem_a = (float *)(((char *) a) + row * pitch_a + col * sizeof(float));
+
         atomicAdd(b, exp(*elem_a - *maxf));
     }
 }
@@ -153,6 +155,7 @@ void softmax(float *a, float *b, float *sum, float *maxf, size_t pitch_a, size_t
         float *elem_a = (float *)(((char *) a) + row * pitch_a + col * sizeof(float));
         float *elem_b = (float *)(((char *) b) + row * pitch_b + col * sizeof(float));
         *elem_b = exp(*elem_a - *maxf) / *sum;
+
     }
 }
 
@@ -167,6 +170,7 @@ void cross_entropy(float *pred, float *label, float *loss, size_t pitch_pred, si
         float elem_loss = -(label[image] == i ? log(mult_pred) : log(1 - mult_pred));
         if (isinf(elem_loss)) elem_loss = 1000000.0f;
         atomicAdd(loss, elem_loss);
+
     }
 }
 
@@ -296,6 +300,7 @@ void initialize_stages() {
     for (sindex = 0; sindex < NUM_STAGES; sindex++) {
         gpuErrchk(cudaMallocPitch(&stages[sindex], &pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0]));
         hstages[sindex] = (float *) calloc(stage_sizes[sindex][1] * stage_sizes[sindex][0], sizeof(float));
+        if (sindex + 1 >= NUM_STAGES) last_stage = (float *) calloc(stage_sizes[sindex][1] * stage_sizes[sindex][0], sizeof(float));
 
         gpuErrchk(cudaMemcpy2D(hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stages[sindex], pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyDeviceToHost));
     }
@@ -333,37 +338,75 @@ void initialize_grads() {
 
 }
 
+__global__
+void debug_kernel(float *a, size_t pitch_a, int h, int w) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        float add = 0;
+        for (int r = 0; r < h; r++) {
+            for (int c = 0; c < w; c++) {
+                float *elem_a = (float *)(((char *) a) + r * pitch_a + c * sizeof(float));
+                add += *elem_a;
+            }
+        }
+        printf("%f ", add);
+    }
+}
+
 void inference(int image, float *ploss, int *pacc) {
 
     matmul<<<16, 1>>>(params[0], stages[0], stages[1], pitch_params[0], pitch_stages[0], pitch_stages[1], LAYER_SIZE_1, INPUT_SIZE, INPUT_SIZE, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     matadd<<<16, 1>>>(stages[1], params[1], stages[2], pitch_stages[1], pitch_params[1], pitch_stages[2], LAYER_SIZE_1, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     leakyrelu<<<16, 1>>>(stages[2], stages[3], 0.2, pitch_stages[2], pitch_stages[3], LAYER_SIZE_1, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
 
     matmul<<<16, 1>>>(params[2], stages[3], stages[4], pitch_params[2], pitch_stages[3], pitch_stages[4], LAYER_SIZE_2, LAYER_SIZE_1, LAYER_SIZE_1, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     matadd<<<16, 1>>>(stages[4], params[3], stages[5], pitch_stages[4], pitch_params[3], pitch_stages[5], LAYER_SIZE_2, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     leakyrelu<<<16, 1>>>(stages[5], stages[6], 0.2, pitch_stages[5], pitch_stages[6], LAYER_SIZE_2, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
 
     matmul<<<10, 1>>>(params[4], stages[6], stages[7], pitch_params[4], pitch_stages[6], pitch_stages[7], LAYER_SIZE_3, LAYER_SIZE_2, LAYER_SIZE_2, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     matadd<<<10, 1>>>(stages[7], params[5], stages[8], pitch_stages[7], pitch_params[5], pitch_stages[8], LAYER_SIZE_3, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
 
     max<<<1, 1>>>(stages[8], maxf, pitch_stages[8], LAYER_SIZE_3, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     expsum<<<10, 1>>>(stages[8], sum, maxf, pitch_stages[8], LAYER_SIZE_3, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     softmax<<<10, 1>>>(stages[8], stages[9], sum, maxf, pitch_stages[8], pitch_stages[9], LAYER_SIZE_3, 1);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
     cross_entropy<<<10, 1>>>(stages[9], labels, loss, pitch_stages[9], LAYER_SIZE_3, 1, image);
+    gpuErrchk( cudaPeekAtLastError() );
+    gpuErrchk( cudaDeviceSynchronize() );
+
+    int nindex;
+
+    gpuErrchk(cudaMemcpy2D(last_stage, stage_sizes[NUM_STAGES - 1][1] * sizeof(float), stages[NUM_STAGES - 1], pitch_stages[NUM_STAGES - 1], stage_sizes[NUM_STAGES - 1][1] * sizeof(float), stage_sizes[NUM_STAGES - 1][0], cudaMemcpyDeviceToHost));
+    int max_index = 0;
+    for (nindex = 1; nindex < stage_sizes[NUM_STAGES - 1][0]; nindex++) {
+        if (last_stage[nindex] > last_stage[max_index]) max_index = nindex;
+    }
+    *pacc += max_index == hlabels[image];
 
     float hloss;
     cudaMemcpy(&hloss, loss, sizeof(float), cudaMemcpyDeviceToHost);
     *ploss += hloss;
-
-    int sindex, nindex;
-    for (sindex = NUM_STAGES - 1; sindex < NUM_STAGES; sindex++) {
-        gpuErrchk(cudaMemcpy2D(hstages[sindex], stage_sizes[sindex][1] * sizeof(float), stages[sindex], pitch_stages[sindex], stage_sizes[sindex][1] * sizeof(float), stage_sizes[sindex][0], cudaMemcpyDeviceToHost));
-        int max_index = 0;
-        for (nindex = 1; nindex < stage_sizes[sindex][0]; nindex++) {
-            if (hstages[sindex][nindex] > hstages[sindex][max_index]) max_index = nindex;
-        }
-        *pacc += max_index == hlabels[image];
-    }
 }
 
 void backprop(int image) {
